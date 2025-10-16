@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+# scripts/generate_relay_config.py
+import csv
+
+rows = [
+    ("relay_id","type","max_bandwidth_bps","max_energy_joules"),
+    ("gbs_1","GBS",1000000000,10000000),
+    ("gbs_2","GBS",1000000000,10000000),
+    ("gbs_3","GBS",1000000000,10000000),
+    ("gbs_4","GBS",1000000000,10000000),
+    ("gbs_5","GBS",1000000000,10000000),
+    ("uav_1","UAV",500000000,500000),
+    ("uav_2","UAV",500000000,500000),
+    ("uav_3","UAV",500000000,500000),
+    ("leo_1","LEO",2000000000,99999999),
+]
+
+with open("csvs/relay_config.csv", "w", newline="") as f:
+    w = csv.writer(f)
+    for r in rows:
+        w.writerow(r)
+print("wrote csvs/relay_config.csv")

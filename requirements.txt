@@ -1,0 +1,19 @@
+# Core Data Science & Plotting
+pandas
+numpy
+matplotlib
+seaborn
+tqdm
+
+# Google Generative AI & LangChain for RAG
+google-generativeai
+langchain
+langchain-google-genai
+
+# Document Loaders & Vector Store
+pypdf
+faiss-cpu
+csv-loader
+
+# For handling API keys from a .env file
+python-dotenv
