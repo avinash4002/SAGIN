@@ -1,15 +1,20 @@
-# main.py (Simulated RAG Version - No LLM)
+# main.py (3-Algorithm Comparison Engine - No API, KeyError Fix)
 
 # ==============================================================================
-#  SAGIN SIMULATOR (BASELINE VS. SIMULATED RAG)
+#  SAGIN 3-ALGORITHM COMPARISON SIMULATOR
 # ==============================================================================
-#  This self-contained script runs a complete simulation comparing a baseline
-#  Stackelberg game with a simulated RAG approach that uses expert heuristics
-#  instead of a live LLM.
+#  Compares:
+#  1. 'stackelberg' (Baseline Game Theory)
+#  2. 'rag' (Simulated RAG Heuristic)
+#  3. 'heuristic' (Greedy/ILP-like Optimal Assignment)
+#
+#  Generates 10 comparative graphs and a final results CSV.
+#  VERSION 4: Fixes KeyError: 'duration' in logging.
 #
 
 # --- Core Libraries ---
 import os
+import time
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -29,19 +34,24 @@ class Config:
     OUTPUT_PATH = "Results/"
 
     # --- Experiment Parameters ---
-    EXPERIMENT_DURATION = 350
-    STRATEGIES = ['stackelberg', 'rag']
-    USER_COUNTS = [20, 30, 40, 50]
+    EXPERIMENT_DURATION = 100
+    STRATEGIES = ['stackelberg', 'rag', 'heuristic']
+    
+    # --- New Experiment Variables for 10 Graphs ---
+    USER_COUNTS = [10, 20, 30, 40, 50]
+    MOBILITY_FACTORS = [0.5, 1.0, 1.5, 2.0]
     RELAY_COUNTS = [5, 7, 9]
-    MOBILITY_FACTORS = [0.5, 1.0, 1.5]
     HORIZONS = [1, 2, 3, 4, 5]
+    PREDICTION_ERRORS = [0.0, 0.1, 0.2, 0.3]
 
 # ==============================================================================
 #  STEP 2: SIMULATION ENGINE
 # ==============================================================================
-def get_network_state(time, active_users, active_relays, data, mobility_factor=1.0, horizon=0):
-    """Predicts network state for a future time (time + horizon)."""
-    user_positions, relay_positions, relay_types = data
+def get_network_state(time, active_users, active_relays, data, params):
+    """Predicts network state, now with added prediction error."""
+    user_positions, relay_positions, relay_types = data['processed']
+    mobility, horizon, pred_error = params['mobility'], params['horizon'], params['pred_error']
+    
     future_time = time + horizon
     state = {'rates': {}, 'costs': {}, 'energy': {}, 'actual_rates': {}}
 
@@ -58,118 +68,280 @@ def get_network_state(time, active_users, active_relays, data, mobility_factor=1
         for relay_id in active_relays:
             if relay_id not in relay_pos_t.index: continue
             relay_pos = relay_pos_t.loc[relay_id]
+            relay_type = relay_types.get(relay_id)
             
-            predicted_user_pos = user_pos[['x', 'y', 'z']] + (user_pos['speed'] * mobility_factor * horizon)
+            predicted_user_pos = user_pos[['x', 'y', 'z']] + (user_pos['speed'] * mobility * horizon)
             distance = np.linalg.norm(predicted_user_pos - relay_pos) / 1000.0
 
-            rate = 150 / (1 + distance**2) + np.random.normal(0, 3)
-            state['rates'][(user_id, relay_id)] = max(5, rate)
-
-            latency = {'GBS': 5, 'UAV': 20, 'LEO': 150}.get(relay_types[relay_id], 50)
+            base_rate = 150 / (1 + distance**2)
+            noise = np.random.normal(0, base_rate * pred_error)
+            predicted_rate = max(5, base_rate + noise)
+            
+            latency = {'GBS': 5, 'UAV': 20, 'LEO': 150}.get(relay_type, 50) + distance * 0.1
             energy = distance * 0.5
-            state['costs'][(user_id, relay_id)] = latency + energy
+            
+            state['rates'][(user_id, relay_id)] = predicted_rate
+            state['costs'][(user_id, relay_id)] = latency
             state['energy'][(user_id, relay_id)] = energy
 
             if not user_pos_future.empty and user_id in user_pos_future.index:
                 actual_distance = np.linalg.norm(user_pos_future.loc[user_id][['x','y','z']] - relay_pos) / 1000.0
-                actual_rate = 150 / (1 + actual_distance**2)
-                state['actual_rates'][(user_id, relay_id)] = max(5, actual_rate)
+                actual_rate = max(5, 150 / (1 + actual_distance**2))
+                state['actual_rates'][(user_id, relay_id)] = actual_rate
+            else:
+                state['actual_rates'][(user_id, relay_id)] = predicted_rate
                 
     return state
 
 def run_simulation(params, data):
-    """Runs a full simulation based on a dictionary of parameters."""
-    strategy, duration, n_users, n_relays, mobility, horizon = params.values()
-    user_mobility_df, relay_mobility_df, relay_config_df = data['raw']
+    """Runs a full simulation, now with 3 algorithms and detailed logging."""
+    strategy, duration, n_users, n_relays = params['strategy'], params['duration'], params['n_users'], params['n_relays']
+    user_mobility_df, relay_config_df, user_config_df = data['raw']
+    relay_types = data['processed'][2]
+    common_users = data['common_users']
     
     results = []
-    all_user_ids = sorted(user_mobility_df['vehicle_id'].unique())
-    all_relay_ids = sorted(relay_mobility_df['relay_id'].unique())
+    all_user_ids = common_users
+    all_relay_ids = sorted(relay_config_df['relay_id'].unique())
     active_users = all_user_ids[:n_users]
     active_relays = all_relay_ids[:n_relays]
+    
+    relay_caps = relay_config_df.set_index('relay_id')['max_bandwidth_bps'].to_dict()
+    user_configs = user_config_df.set_index('user_id')
 
-    for t in range(1, duration - horizon):
-        state = get_network_state(t, active_users, active_relays, data['processed'], mobility, horizon)
+    if strategy == 'rag':
+        initial_prices = {rid: 0.5 if 'gbs' in rid else (1.5 if 'uav' in rid else 3.0) for rid in active_relays}
+    elif strategy == 'stackelberg':
+        initial_prices = {relay_id: 1.0 for relay_id in active_relays}
+        
+    for t in range(1, duration - params['horizon']):
+        state = get_network_state(t, active_users, active_relays, data, params)
         if not state or not state['rates']: continue
 
-        if strategy == 'stackelberg':
-            prices = {relay_id: 1.0 for relay_id in active_relays}
-        else: # Simulated RAG: Smarter initial prices based on expert rules
-            prices = {rid: 0.5 if 'gbs' in rid else (1.5 if 'uav' in rid else 3.0) for rid in active_relays}
-
         assignments = {}
-        for i in range(15):
-            user_choices = {user_id: max({r_id: state['rates'].get((user_id, r_id), 0) - p * state['costs'].get((user_id, r_id), -np.inf)
-                                          for r_id, p in prices.items()}, key=lambda r: state['rates'].get((user_id, r), 0) - prices[r] * state['costs'].get((user_id, r), -np.inf))
-                           for user_id in active_users}
-            if user_choices == assignments: break
-            assignments = user_choices
-            
-            loads = {r: list(assignments.values()).count(r) for r in active_relays}
-            for r_id in active_relays:
-                if loads[r_id] > n_users / n_relays: prices[r_id] *= 1.1
-                elif loads[r_id] == 0: prices[r_id] *= 0.9
-
-        achieved_rates = [state['rates'].get((u, r), 0) for u, r in assignments.items()]
-        actual_rates = [state['actual_rates'].get((u, r), 0) for u, r in assignments.items()]
+        algo_runtime = 0
+        iterations = 1
         
+        t_start = time.time()
+        if strategy == 'stackelberg' or strategy == 'rag':
+            prices = initial_prices.copy()
+            for i in range(15):
+                user_choices = {user_id: max({r_id: state['rates'].get((user_id, r_id), 0) - p * state['costs'].get((user_id, r_id), -np.inf)
+                                              for r_id, p in prices.items()}, key=lambda r: state['rates'].get((user_id, r), 0) - prices[r] * state['costs'].get((user_id, r), -np.inf))
+                               for user_id in active_users}
+                
+                if user_choices == assignments: break
+                assignments = user_choices
+                
+                loads = {r: sum(user_configs.loc[u]['base_demand'] for u, relay in assignments.items() if relay == r) for r in active_relays}
+                for r_id in active_relays:
+                    if loads.get(r_id, 0) > relay_caps.get(r_id, 1e9): prices[r_id] *= 1.1
+                    elif loads.get(r_id, 0) == 0: prices[r_id] *= 0.9
+            iterations = i + 1
+
+        elif strategy == 'heuristic':
+            sorted_users = sorted(active_users, key=lambda u: user_configs.loc[u]['base_demand'], reverse=True)
+            relay_loads = {r: 0 for r in active_relays}
+            for user_id in sorted_users:
+                best_relay = None
+                best_rate = -1
+                demand = user_configs.loc[user_id]['base_demand']
+                for relay_id in active_relays:
+                    rate = state['rates'].get((user_id, relay_id), 0)
+                    if rate > best_rate and (relay_loads[relay_id] + demand) <= relay_caps.get(relay_id, 1e9):
+                        best_rate = rate
+                        best_relay = relay_id
+                
+                if best_relay:
+                    assignments[user_id] = best_relay
+                    relay_loads[best_relay] += demand
+        
+        algo_runtime = time.time() - t_start
+        
+        total_utility, total_energy, qos_violations = 0, 0, 0
+        layer_util = {'GBS': [], 'UAV': [], 'LEO': []}
+        achieved_rates, actual_rates = [], []
+        
+        for user_id, relay_id in assignments.items():
+            if not relay_id: continue
+            
+            pred_rate = state['rates'].get((user_id, relay_id), 0)
+            act_rate = state['actual_rates'].get((user_id, relay_id), 0)
+            latency = state['costs'].get((user_id, relay_id), 0)
+            energy = state['energy'].get((user_id, relay_id), 0)
+            
+            achieved_rates.append(pred_rate)
+            actual_rates.append(act_rate)
+            total_utility += act_rate
+            total_energy += energy
+            
+            if latency > user_configs.loc[user_id]['max_delay_ms']:
+                qos_violations += 1
+            
+            layer_type = relay_types.get(relay_id)
+            if layer_type:
+                demand = user_configs.loc[user_id]['base_demand']
+                capacity = relay_caps.get(relay_id, 1e9)
+                if capacity > 0:
+                    layer_util[layer_type].append(demand / capacity)
+
+        #
+        # --- THIS IS THE FIX ---
+        #
         results.append({
-            'strategy': strategy, 'num_users': n_users, 'num_relays': n_relays,
-            'mobility': mobility, 'time_horizon': horizon, 'iterations': i + 1,
-            'total_utility': sum(achieved_rates),
-            'avg_delay': np.mean([state['costs'].get((u, r), 0) for u, r in assignments.items()]),
-            'total_energy': sum(state['energy'].get((u, r), 0) for u, r in assignments.items()),
-            'fairness': (np.sum(achieved_rates)**2) / (len(achieved_rates) * np.sum(np.square(achieved_rates))) if sum(achieved_rates) > 0 else 0,
-            'prediction_error': np.mean([abs(p - a) for p, a in zip(achieved_rates, actual_rates) if a > 0])
+            'time': t, 'strategy': strategy, 'n_users': n_users, 'n_relays': n_relays,
+            'mobility': params['mobility'], 'horizon': params['horizon'], 'pred_error': params['pred_error'],
+            'duration': duration, # <--- THIS LINE WAS MISSING
+            'total_utility': total_utility,
+            'avg_latency': np.mean([state['costs'].get((u, r), 0) for u, r in assignments.items() if r]),
+            'total_energy': total_energy,
+            'qos_violation_rate': qos_violations / n_users if n_users > 0 else 0,
+            'gai_runtime': 0,
+            'algo_runtime': algo_runtime,
+            'iterations': iterations,
+            'util_gbs': np.mean(layer_util['GBS']) if layer_util['GBS'] else 0,
+            'util_uav': np.mean(layer_util['UAV']) if layer_util['UAV'] else 0,
+            'util_leo': np.mean(layer_util['LEO']) if layer_util['LEO'] else 0,
+            'pred_accuracy': np.mean([abs(p - a) / a for p, a in zip(achieved_rates, actual_rates) if a > 0])
         })
         
     return pd.DataFrame(results)
 
+def run_price_convergence_experiment(data):
+    """A special experiment just for the price convergence graph."""
+    print("📈 Running Price Convergence sub-experiment...")
+    
+    common_users = data['common_users']
+    all_relay_ids = sorted(data['raw'][1]['relay_id'].unique())
+    
+    params = {'strategy': 'stackelberg', 'n_users': 50, 'n_relays': 9, 'duration': 2, 'mobility': 1.0, 'horizon': 1, 'pred_error': 0.1}
+    state = get_network_state(1, common_users[:50], all_relay_ids[:9], data, params)
+    
+    relay_ids = all_relay_ids[:9]
+    user_ids = common_users[:50]
+    relay_caps = data['raw'][1].set_index('relay_id')['max_bandwidth_bps'].to_dict()
+    user_configs = data['raw'][2].set_index('user_id')
+
+    strategies = {
+        'stackelberg': {r: 1.0 for r in relay_ids},
+        'rag': {rid: 0.5 if 'gbs' in rid else (1.5 if 'uav' in rid else 3.0) for rid in relay_ids}
+    }
+    
+    price_logs = []
+    
+    for strategy, initial_prices in strategies.items():
+        prices = initial_prices.copy()
+        assignments = {}
+        for i in range(25):
+            user_choices = {user_id: max({r_id: state['rates'].get((user_id, r_id), 0) - p * state['costs'].get((user_id, r_id), -np.inf)
+                                          for r_id, p in prices.items()}, key=lambda r: state['rates'].get((user_id, r), 0) - prices[r] * state['costs'].get((user_id, r), -np.inf))
+                           for user_id in user_ids}
+            
+            assignments = user_choices
+            loads = {r: sum(user_configs.loc[u]['base_demand'] for u, relay in assignments.items() if relay == r) for r in relay_ids}
+            
+            for r_id in ['gbs_1', 'uav_1', 'leo_1']:
+                if r_id in prices:
+                    price_logs.append({'iteration': i, 'strategy': strategy, 'relay': r_id, 'price': prices[r_id]})
+
+            for r_id in relay_ids:
+                if loads.get(r_id, 0) > relay_caps.get(r_id, 1e9): prices[r_id] *= 1.1
+                elif loads.get(r_id, 0) == 0: prices[r_id] *= 0.9
+                
+    return pd.DataFrame(price_logs)
+
 # ==============================================================================
-#  STEP 3: EXPERIMENT ORCHESTRATION & VISUALIZATION
+#  STEP 3: EXPERIMENT ORCHESTRATION
 # ==============================================================================
 def run_all_experiments(data):
-    """Defines and runs all experimental scenarios."""
+    """Defines and runs all new experimental scenarios."""
     print("\n🔥 Starting all experiments...")
     scenarios = []
-    for strategy in Config.STRATEGIES:
-        for n_users in Config.USER_COUNTS: scenarios.append({'strategy': strategy, 'duration': Config.EXPERIMENT_DURATION, 'n_users': n_users, 'n_relays': 9, 'mobility': 1.0, 'horizon': 1})
-        for n_relays in Config.RELAY_COUNTS: scenarios.append({'strategy': strategy, 'duration': Config.EXPERIMENT_DURATION, 'n_users': 50, 'n_relays': n_relays, 'mobility': 1.0, 'horizon': 1})
-        for mobility in Config.MOBILITY_FACTORS: scenarios.append({'strategy': strategy, 'duration': Config.EXPERIMENT_DURATION, 'n_users': 50, 'n_relays': 9, 'mobility': mobility, 'horizon': 1})
-        for horizon in Config.HORIZONS: scenarios.append({'strategy': strategy, 'duration': Config.EXPERIMENT_DURATION, 'n_users': 50, 'n_relays': 9, 'mobility': 1.0, 'horizon': horizon})
     
+    base_params = {'duration': Config.EXPERIMENT_DURATION, 'n_users': 50, 'n_relays': 9, 'mobility': 1.0, 'horizon': 1, 'pred_error': 0.1}
+    for strategy in Config.STRATEGIES:
+        scenarios.append({**base_params, 'strategy': strategy})
+
+    for n_users in Config.USER_COUNTS:
+        for strategy in Config.STRATEGIES:
+            scenarios.append({'strategy': strategy, 'duration': 50, 'n_users': n_users, 'n_relays': 9, 'mobility': 1.0, 'horizon': 1, 'pred_error': 0.1})
+            
+    for mobility in Config.MOBILITY_FACTORS:
+        for strategy in Config.STRATEGIES:
+            scenarios.append({'strategy': strategy, 'duration': 50, 'n_users': 50, 'n_relays': 9, 'mobility': mobility, 'horizon': 1, 'pred_error': 0.1})
+
+    for n_relays in Config.RELAY_COUNTS:
+        for strategy in Config.STRATEGIES:
+            scenarios.append({'strategy': strategy, 'duration': 50, 'n_users': 50, 'n_relays': n_relays, 'mobility': 1.0, 'horizon': 1, 'pred_error': 0.1})
+
+    for horizon in Config.HORIZONS:
+        for strategy in Config.STRATEGIES:
+            scenarios.append({'strategy': strategy, 'duration': 50, 'n_users': 50, 'n_relays': 9, 'mobility': 1.0, 'horizon': horizon, 'pred_error': 0.1})
+
+    for pred_error in Config.PREDICTION_ERRORS:
+        for strategy in Config.STRATEGIES:
+            scenarios.append({'strategy': strategy, 'duration': 50, 'n_users': 50, 'n_relays': 9, 'mobility': 1.0, 'horizon': 1, 'pred_error': pred_error})
+
     all_results = [run_simulation(params, data) for params in tqdm(scenarios, desc="Overall Progress")]
+    
+    price_conv_df = run_price_convergence_experiment(data)
+    
     results_df = pd.concat(all_results, ignore_index=True)
     print("🏁 All experiments complete!")
-    return results_df
+    return results_df, price_conv_df
 
-def generate_and_save_graphs(results_df):
-    """Takes the final DataFrame and generates all plots, saving them to files."""
-    print("\n📊 Generating and saving final comparison graphs...")
-    fig, axes = plt.subplots(3, 2, figsize=(20, 24))
-    fig.suptitle('Performance Comparison: Baseline Stackelberg vs. Simulated RAG', fontsize=22, y=1.02)
-
-    user_agg = results_df.groupby(['num_users', 'strategy']).mean().reset_index()
+# ==============================================================================
+#  STEP 4: VISUALIZATION
+# ==============================================================================
+def generate_and_save_graphs(results_df, price_conv_df):
+    """Takes the final DataFrames and generates all 10 plots."""
+    print("\n📊 Generating and saving final graphs...")
+    os.makedirs(Config.OUTPUT_PATH, exist_ok=True)
+    
+    fig, axes = plt.subplots(5, 2, figsize=(20, 30))
+    fig.suptitle('SAGIN 3-Algorithm Performance Comparison', fontsize=22, y=1.02)
+    
+    user_agg = results_df.groupby(['n_users', 'strategy']).mean().reset_index()
     mobility_agg = results_df.groupby(['mobility', 'strategy']).mean().reset_index()
-    relay_agg = results_df.groupby(['num_relays', 'strategy']).mean().reset_index()
-    horizon_agg = results_df.groupby(['time_horizon', 'strategy']).mean().reset_index()
-    strategy_agg = results_df.groupby(['strategy']).mean().reset_index()
+    relay_agg = results_df.groupby(['n_relays', 'strategy']).mean().reset_index()
+    horizon_agg = results_df.groupby(['horizon', 'strategy']).mean().reset_index()
+    error_agg = results_df.groupby(['pred_error', 'strategy']).mean().reset_index()
+    
+    # This filter is now safe because the 'duration' column exists
+    time_agg = results_df[results_df['duration'] == Config.EXPERIMENT_DURATION] 
+    
+    try:
+        with pd.ExcelWriter(os.path.join(Config.OUTPUT_PATH, "all_graph_data.xlsx")) as writer:
+            user_agg.to_excel(writer, sheet_name='vs_Users', index=False)
+            mobility_agg.to_excel(writer, sheet_name='vs_Mobility', index=False)
+            relay_agg.to_excel(writer, sheet_name='vs_Relays', index=False)
+            horizon_agg.to_excel(writer, sheet_name='vs_Horizon', index=False)
+            error_agg.to_excel(writer, sheet_name='vs_PredError', index=False)
+            time_agg.to_excel(writer, sheet_name='vs_Time', index=False)
+            price_conv_df.to_excel(writer, sheet_name='Price_Convergence', index=False)
+        print(f"✅ Aggregated data for graphs saved to {os.path.join(Config.OUTPUT_PATH, 'all_graph_data.xlsx')}")
+    except Exception as e:
+        print(f"Could not save Excel file. Error: {e}")
 
-    sns.lineplot(data=user_agg, x='num_users', y='total_utility', hue='strategy', marker='o', ax=axes[0, 0]).set(title='Utility vs. User Count', xlabel='Number of Users', ylabel='Average Total Utility (Mbps)')
-    sns.lineplot(data=mobility_agg, x='mobility', y='avg_delay', hue='strategy', marker='o', ax=axes[0, 1]).set(title='Delay vs. Mobility', xlabel='Mobility Factor', ylabel='Average Delay/Cost')
-    sns.lineplot(data=user_agg, x='num_users', y='total_energy', hue='strategy', marker='o', ax=axes[1, 0]).set(title='Energy vs. User Count', xlabel='Number of Users', ylabel='Average Total Energy')
-    sns.barplot(data=strategy_agg, x='strategy', y='fairness', hue='strategy', ax=axes[1, 1]).set(title='Overall Fairness by Strategy', xlabel='Strategy', ylabel='Average Fairness (Jain\'s Index)')
-    sns.lineplot(data=relay_agg, x='num_relays', y='iterations', hue='strategy', marker='o', ax=axes[2, 0]).set(title='Convergence vs. Relay Count', xlabel='Number of Relays', ylabel='Avg. Iterations to Converge')
-    sns.lineplot(data=horizon_agg, x='time_horizon', y='prediction_error', hue='strategy', marker='o', ax=axes[2, 1]).set(title='Prediction Error vs. Time Horizon', xlabel='Prediction Horizon (seconds)', ylabel='Mean Absolute Error (Mbps)')
+    sns.lineplot(data=user_agg, x='n_users', y='total_utility', hue='strategy', marker='o', ax=axes[0, 0]).set(title='1. System Utility vs. Number of Users', xlabel='Number of Users (Traffic Load)')
+    sns.lineplot(data=mobility_agg, x='mobility', y='avg_latency', hue='strategy', marker='o', ax=axes[0, 1]).set(title='2. Average Latency vs. User Mobility Speed', xlabel='Mobility Factor')
+    sns.lineplot(data=time_agg, x='time', y='total_energy', hue='strategy', ax=axes[1, 0]).set(title='3. Energy Utilization vs. Time', xlabel='Time (seconds)')
+    sns.lineplot(data=price_conv_df, x='iteration', y='price', hue='strategy', style='relay', markers=True, ax=axes[1, 1]).set(title='4. Price Convergence of Relay Nodes', xlabel='Iteration')
+    sns.lineplot(data=horizon_agg, x='horizon', y='pred_accuracy', hue='strategy', marker='o', ax=axes[2, 0]).set(title='5. Prediction Accuracy vs. DT Horizon Length', xlabel='Horizon (seconds)', ylabel='Mean Absolute % Error')
+    sns.lineplot(data=relay_agg, x='n_relays', y='total_utility', hue='strategy', marker='o', ax=axes[2, 1]).set(title='6. System Utility vs. Number of Relay Nodes', xlabel='Number of Relays')
+    sns.lineplot(data=user_agg, x='n_users', y='qos_violation_rate', hue='strategy', marker='o', ax=axes[3, 0]).set(title='7. QoS Violation Rate vs. Traffic Load', xlabel='Number of Users (Traffic Load)')
+    sns.lineplot(data=user_agg, x='n_users', y='algo_runtime', hue='strategy', marker='o', ax=axes[3, 1]).set(title='8. Optimization Runtime vs. Number of Users', xlabel='Number of Users', ylabel='Runtime (seconds)')
     
-    axes[0, 1].set_xticks(Config.MOBILITY_FACTORS)
-    axes[1, 1].set_ylim(bottom=0.5)
-    for ax in axes.flat: ax.legend(title='Strategy')
+    util_df = time_agg.melt(id_vars=['time', 'strategy'], value_vars=['util_gbs', 'util_uav', 'util_leo'], var_name='Layer', value_name='Utilization')
+    sns.lineplot(data=util_df, x='time', y='Utilization', hue='strategy', style='Layer', ax=axes[4, 0]).set(title='9. Resource Utilization per Layer vs. Time', xlabel='Time (seconds)')
     
-    plt.tight_layout()
-    fig.savefig(os.path.join(Config.OUTPUT_PATH, "all_graphs_summary.png"), dpi=300)
+    sns.lineplot(data=error_agg, x='pred_error', y='total_utility', hue='strategy', marker='o', ax=axes[4, 1]).set(title='10. System Performance vs. Prediction Error', xlabel='Prediction Error Factor')
+
+    plt.tight_layout(rect=[0, 0, 1, 0.98])
+    fig_path = os.path.join(Config.OUTPUT_PATH, "all_10_graphs.png")
+    fig.savefig(fig_path, dpi=300)
+    print(f"✅ All 10 graphs saved to {fig_path}")
     plt.show()
-    print(f"✅ All graphs generated and saved to the {Config.OUTPUT_PATH} folder.")
 
 # ==============================================================================
 #  MAIN EXECUTION BLOCK
@@ -180,35 +352,66 @@ if __name__ == "__main__":
     os.makedirs(Config.OUTPUT_PATH, exist_ok=True)
     
     # --- Load Data ---
-    print("🚀 Starting SAGIN Simulator...")
+    print("🚀 Starting SAGIN Simulator (3-Algorithm)...")
     print("  -> Loading and pre-processing data...")
     try:
         user_mobility_df = pd.read_csv(os.path.join(Config.INPUT_CSV_PATH, 'user_mobility.csv'))
         relay_config_df = pd.read_csv(os.path.join(Config.INPUT_CSV_PATH, 'relay_config.csv'))
+        user_config_df = pd.read_csv(os.path.join(Config.INPUT_CSV_PATH, 'user_config.csv'))
+
+        print("  -> Standardizing user IDs to match 'veh' format (e.g., user_1 -> veh0)...")
+        try:
+            user_config_df['user_id'] = user_config_df['user_id'].apply(
+                lambda x: f"veh{int(x.split('_')[1]) - 1}"
+            )
+            print("  -> Standardization complete.")
+        except Exception as e:
+            print(f"  -> WARNING: Could not auto-standardize user_id. Assuming formats already match. Error: {e}")
+
+        mob_users = set(user_mobility_df['vehicle_id'].unique())
+        cfg_users = set(user_config_df['user_id'].unique())
+        common_users = sorted(list(mob_users.intersection(cfg_users)))
+
+        if not common_users:
+            print(f"❌ ERROR: No common users found between user_mobility.csv (IDs: {list(mob_users)[:3]}...) "
+                  f"and user_config.csv (IDs: {list(cfg_users)[:3]}...). Check standardization logic.")
+            exit()
+        
+        print(f"  -> Found {len(common_users)} common users. Proceeding with this set.")
+        
+        user_mobility_df = user_mobility_df[user_mobility_df['vehicle_id'].isin(common_users)].copy()
+        user_config_df = user_config_df[user_config_df['user_id'].isin(common_users)].copy()
+
+        relay_config_df['max_bandwidth_bps'] = relay_config_df['max_bandwidth_bps'] / 1e6
+        user_config_df['base_demand'] = np.random.randint(2, 10, size=len(user_config_df))
+        
         relay_mobility_df = pd.concat([
             pd.read_csv(os.path.join(Config.INPUT_CSV_PATH, 'ground_relay_mobility.csv')),
             pd.read_csv(os.path.join(Config.INPUT_CSV_PATH, 'air_relay_mobility.csv')),
             pd.read_csv(os.path.join(Config.INPUT_CSV_PATH, 'space_relay_mobility.csv'))
         ], ignore_index=True)
         
-        # Pre-process data for faster lookups during simulation
         user_positions = {t: df.set_index('vehicle_id')[['x', 'y', 'z', 'speed']] for t, df in user_mobility_df.groupby('timestep')}
         relay_positions = {t: df.set_index('relay_id')[['x', 'y', 'z']] for t, df in relay_mobility_df.groupby('timestep')}
         relay_types = relay_config_df.set_index('relay_id')['type'].to_dict()
 
-        # Package data for easy passing
         simulation_data = {
-            'raw': (user_mobility_df, relay_mobility_df, relay_config_df),
-            'processed': (user_positions, relay_positions, relay_types)
+            'raw': (user_mobility_df, relay_config_df, user_config_df),
+            'processed': (user_positions, relay_positions, relay_types),
+            'common_users': common_users
         }
         print("  -> Data loaded successfully.")
     except FileNotFoundError as e:
         print(f"❌ ERROR: Could not find a required data file. Please check your INPUT_CSV_PATH.")
         print(f"  -> Details: {e}")
         exit()
+    except KeyError as e:
+        print(f"❌ ERROR: A required column is missing from your CSVs. Details: {e}")
+        exit()
+    except Exception as e:
+        print(f"❌ An unexpected error occurred during data loading: {e}")
+        exit()
 
     # --- Run Experiments and Generate Outputs ---
-    results = run_all_experiments(simulation_data)
-    results.to_csv(os.path.join(Config.OUTPUT_PATH, "final_simulation_results.csv"), index=False)
-    print(f"\n✅ Final numerical results saved to {Config.OUTPUT_PATH}final_simulation_results.csv")
-    generate_and_save_graphs(results)
+    results, price_df = run_all_experiments(simulation_data)
+    generate_and_save_graphs(results, price_df)
