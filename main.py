@@ -35,7 +35,7 @@ class Config:
     OUTPUT_PATH = "Results/"
 
     # --- Experiment Parameters ---
-    EXPERIMENT_DURATION = 100
+    EXPERIMENT_DURATION = 500
     STRATEGIES = ['stackelberg', 'rag', 'heuristic']
     
     # --- New Experiment Variables for 10 Graphs ---
