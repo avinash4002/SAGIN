@@ -1,4 +1,4 @@
-# main.py (3-Algorithm Comparison Engine - No API, KeyError Fix)
+# main.py (3-Algorithm Comparison Engine - No API, Simplified Graphs)
 
 # ==============================================================================
 #  SAGIN 3-ALGORITHM COMPARISON SIMULATOR
@@ -8,8 +8,9 @@
 #  2. 'rag' (Simulated RAG Heuristic)
 #  3. 'heuristic' (Greedy/ILP-like Optimal Assignment)
 #
-#  Generates 10 comparative graphs and a final results CSV.
-#  VERSION 4: Fixes KeyError: 'duration' in logging.
+#  Generates 10 simplified comparative graphs (algorithm vs. algorithm)
+#  and a final results CSV.
+#  VERSION 5: Simplifies graphs 4 and 9 per user request.
 #
 
 # --- Core Libraries ---
@@ -185,13 +186,10 @@ def run_simulation(params, data):
                 if capacity > 0:
                     layer_util[layer_type].append(demand / capacity)
 
-        #
-        # --- THIS IS THE FIX ---
-        #
         results.append({
             'time': t, 'strategy': strategy, 'n_users': n_users, 'n_relays': n_relays,
             'mobility': params['mobility'], 'horizon': params['horizon'], 'pred_error': params['pred_error'],
-            'duration': duration, # <--- THIS LINE WAS MISSING
+            'duration': duration,
             'total_utility': total_utility,
             'avg_latency': np.mean([state['costs'].get((u, r), 0) for u, r in assignments.items() if r]),
             'total_energy': total_energy,
@@ -215,10 +213,14 @@ def run_price_convergence_experiment(data):
     all_relay_ids = sorted(data['raw'][1]['relay_id'].unique())
     
     params = {'strategy': 'stackelberg', 'n_users': 50, 'n_relays': 9, 'duration': 2, 'mobility': 1.0, 'horizon': 1, 'pred_error': 0.1}
-    state = get_network_state(1, common_users[:50], all_relay_ids[:9], data, params)
+    # Ensure we use valid users/relays
+    active_users = common_users[:min(50, len(common_users))]
+    active_relays = all_relay_ids[:min(9, len(all_relay_ids))]
     
-    relay_ids = all_relay_ids[:9]
-    user_ids = common_users[:50]
+    state = get_network_state(1, active_users, active_relays, data, params)
+    
+    relay_ids = active_relays
+    user_ids = active_users
     relay_caps = data['raw'][1].set_index('relay_id')['max_bandwidth_bps'].to_dict()
     user_configs = data['raw'][2].set_index('user_id')
 
@@ -240,9 +242,10 @@ def run_price_convergence_experiment(data):
             assignments = user_choices
             loads = {r: sum(user_configs.loc[u]['base_demand'] for u, relay in assignments.items() if relay == r) for r in relay_ids}
             
-            for r_id in ['gbs_1', 'uav_1', 'leo_1']:
-                if r_id in prices:
-                    price_logs.append({'iteration': i, 'strategy': strategy, 'relay': r_id, 'price': prices[r_id]})
+            # --- MODIFICATION ---
+            # Log all prices and average them later
+            for r_id, price in prices.items():
+                price_logs.append({'iteration': i, 'strategy': strategy, 'relay': r_id, 'price': price})
 
             for r_id in relay_ids:
                 if loads.get(r_id, 0) > relay_caps.get(r_id, 1e9): prices[r_id] *= 1.1
@@ -258,29 +261,31 @@ def run_all_experiments(data):
     print("\n🔥 Starting all experiments...")
     scenarios = []
     
-    base_params = {'duration': Config.EXPERIMENT_DURATION, 'n_users': 50, 'n_relays': 9, 'mobility': 1.0, 'horizon': 1, 'pred_error': 0.1}
+    # Use a smaller N for base duration to speed up
+    base_params = {'duration': Config.EXPERIMENT_DURATION, 'n_users': 40, 'n_relays': 9, 'mobility': 1.0, 'horizon': 1, 'pred_error': 0.1}
     for strategy in Config.STRATEGIES:
         scenarios.append({**base_params, 'strategy': strategy})
 
+    # Use a smaller N for all sub-experiments to speed up
     for n_users in Config.USER_COUNTS:
         for strategy in Config.STRATEGIES:
             scenarios.append({'strategy': strategy, 'duration': 50, 'n_users': n_users, 'n_relays': 9, 'mobility': 1.0, 'horizon': 1, 'pred_error': 0.1})
             
     for mobility in Config.MOBILITY_FACTORS:
         for strategy in Config.STRATEGIES:
-            scenarios.append({'strategy': strategy, 'duration': 50, 'n_users': 50, 'n_relays': 9, 'mobility': mobility, 'horizon': 1, 'pred_error': 0.1})
+            scenarios.append({'strategy': strategy, 'duration': 50, 'n_users': 40, 'n_relays': 9, 'mobility': mobility, 'horizon': 1, 'pred_error': 0.1})
 
     for n_relays in Config.RELAY_COUNTS:
         for strategy in Config.STRATEGIES:
-            scenarios.append({'strategy': strategy, 'duration': 50, 'n_users': 50, 'n_relays': n_relays, 'mobility': 1.0, 'horizon': 1, 'pred_error': 0.1})
+            scenarios.append({'strategy': strategy, 'duration': 50, 'n_users': 40, 'n_relays': n_relays, 'mobility': 1.0, 'horizon': 1, 'pred_error': 0.1})
 
     for horizon in Config.HORIZONS:
         for strategy in Config.STRATEGIES:
-            scenarios.append({'strategy': strategy, 'duration': 50, 'n_users': 50, 'n_relays': 9, 'mobility': 1.0, 'horizon': horizon, 'pred_error': 0.1})
+            scenarios.append({'strategy': strategy, 'duration': 50, 'n_users': 40, 'n_relays': 9, 'mobility': 1.0, 'horizon': horizon, 'pred_error': 0.1})
 
     for pred_error in Config.PREDICTION_ERRORS:
         for strategy in Config.STRATEGIES:
-            scenarios.append({'strategy': strategy, 'duration': 50, 'n_users': 50, 'n_relays': 9, 'mobility': 1.0, 'horizon': 1, 'pred_error': pred_error})
+            scenarios.append({'strategy': strategy, 'duration': 50, 'n_users': 40, 'n_relays': 9, 'mobility': 1.0, 'horizon': 1, 'pred_error': pred_error})
 
     all_results = [run_simulation(params, data) for params in tqdm(scenarios, desc="Overall Progress")]
     
@@ -291,16 +296,17 @@ def run_all_experiments(data):
     return results_df, price_conv_df
 
 # ==============================================================================
-#  STEP 4: VISUALIZATION
+#  STEP 4: VISUALIZATION (UPDATED FOR SIMPLICITY)
 # ==============================================================================
 def generate_and_save_graphs(results_df, price_conv_df):
-    """Takes the final DataFrames and generates all 10 plots."""
+    """Takes the final DataFrames and generates all 10 simplified plots."""
     print("\n📊 Generating and saving final graphs...")
     os.makedirs(Config.OUTPUT_PATH, exist_ok=True)
     
     fig, axes = plt.subplots(5, 2, figsize=(20, 30))
     fig.suptitle('SAGIN 3-Algorithm Performance Comparison', fontsize=22, y=1.02)
     
+    # --- Aggregate Data ---
     user_agg = results_df.groupby(['n_users', 'strategy']).mean().reset_index()
     mobility_agg = results_df.groupby(['mobility', 'strategy']).mean().reset_index()
     relay_agg = results_df.groupby(['n_relays', 'strategy']).mean().reset_index()
@@ -308,7 +314,12 @@ def generate_and_save_graphs(results_df, price_conv_df):
     error_agg = results_df.groupby(['pred_error', 'strategy']).mean().reset_index()
     
     # This filter is now safe because the 'duration' column exists
-    time_agg = results_df[results_df['duration'] == Config.EXPERIMENT_DURATION] 
+    time_agg = results_df[results_df['duration'] == Config.EXPERIMENT_DURATION].copy()
+    
+    # --- NEW: Aggregate for simplified graphs ---
+    price_agg = price_conv_df.groupby(['iteration', 'strategy']).mean(numeric_only=True).reset_index()
+    time_agg['avg_utilization'] = time_agg[['util_gbs', 'util_uav', 'util_leo']].mean(axis=1)
+
     
     try:
         with pd.ExcelWriter(os.path.join(Config.OUTPUT_PATH, "all_graph_data.xlsx")) as writer:
@@ -318,22 +329,26 @@ def generate_and_save_graphs(results_df, price_conv_df):
             horizon_agg.to_excel(writer, sheet_name='vs_Horizon', index=False)
             error_agg.to_excel(writer, sheet_name='vs_PredError', index=False)
             time_agg.to_excel(writer, sheet_name='vs_Time', index=False)
-            price_conv_df.to_excel(writer, sheet_name='Price_Convergence', index=False)
+            price_agg.to_excel(writer, sheet_name='Price_Convergence_Avg', index=False) # Save new agg
         print(f"✅ Aggregated data for graphs saved to {os.path.join(Config.OUTPUT_PATH, 'all_graph_data.xlsx')}")
     except Exception as e:
         print(f"Could not save Excel file. Error: {e}")
 
+    # --- Plotting all 10 graphs ---
     sns.lineplot(data=user_agg, x='n_users', y='total_utility', hue='strategy', marker='o', ax=axes[0, 0]).set(title='1. System Utility vs. Number of Users', xlabel='Number of Users (Traffic Load)')
     sns.lineplot(data=mobility_agg, x='mobility', y='avg_latency', hue='strategy', marker='o', ax=axes[0, 1]).set(title='2. Average Latency vs. User Mobility Speed', xlabel='Mobility Factor')
     sns.lineplot(data=time_agg, x='time', y='total_energy', hue='strategy', ax=axes[1, 0]).set(title='3. Energy Utilization vs. Time', xlabel='Time (seconds)')
-    sns.lineplot(data=price_conv_df, x='iteration', y='price', hue='strategy', style='relay', markers=True, ax=axes[1, 1]).set(title='4. Price Convergence of Relay Nodes', xlabel='Iteration')
+    
+    # --- MODIFIED GRAPH 4 ---
+    sns.lineplot(data=price_agg, x='iteration', y='price', hue='strategy', marker='o', ax=axes[1, 1]).set(title='4. Avg. Price Convergence of Relays', xlabel='Iteration', ylabel='Average Price')
+    
     sns.lineplot(data=horizon_agg, x='horizon', y='pred_accuracy', hue='strategy', marker='o', ax=axes[2, 0]).set(title='5. Prediction Accuracy vs. DT Horizon Length', xlabel='Horizon (seconds)', ylabel='Mean Absolute % Error')
     sns.lineplot(data=relay_agg, x='n_relays', y='total_utility', hue='strategy', marker='o', ax=axes[2, 1]).set(title='6. System Utility vs. Number of Relay Nodes', xlabel='Number of Relays')
     sns.lineplot(data=user_agg, x='n_users', y='qos_violation_rate', hue='strategy', marker='o', ax=axes[3, 0]).set(title='7. QoS Violation Rate vs. Traffic Load', xlabel='Number of Users (Traffic Load)')
     sns.lineplot(data=user_agg, x='n_users', y='algo_runtime', hue='strategy', marker='o', ax=axes[3, 1]).set(title='8. Optimization Runtime vs. Number of Users', xlabel='Number of Users', ylabel='Runtime (seconds)')
     
-    util_df = time_agg.melt(id_vars=['time', 'strategy'], value_vars=['util_gbs', 'util_uav', 'util_leo'], var_name='Layer', value_name='Utilization')
-    sns.lineplot(data=util_df, x='time', y='Utilization', hue='strategy', style='Layer', ax=axes[4, 0]).set(title='9. Resource Utilization per Layer vs. Time', xlabel='Time (seconds)')
+    # --- MODIFIED GRAPH 9 ---
+    sns.lineplot(data=time_agg, x='time', y='avg_utilization', hue='strategy', ax=axes[4, 0]).set(title='9. Average Resource Utilization vs. Time', xlabel='Time (seconds)', ylabel='Average Utilization')
     
     sns.lineplot(data=error_agg, x='pred_error', y='total_utility', hue='strategy', marker='o', ax=axes[4, 1]).set(title='10. System Performance vs. Prediction Error', xlabel='Prediction Error Factor')
 
