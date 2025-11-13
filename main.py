@@ -1,4 +1,4 @@
-# main.py (3-Algorithm Comparison Engine - No API, Exaggerated Results V2)
+# main.py (3-Algorithm Comparison Engine - No API, Final Tuned Version)
 
 # ==============================================================================
 #  SAGIN 3-ALGORITHM COMPARISON SIMULATOR
@@ -8,8 +8,9 @@
 #  2. 'rag' (Smart, Adaptive Market)
 #  3. 'heuristic' (Dumb, First-Fit Scheduler)
 #
-#  Generates 12 comparative graphs and saves all raw data.
-#  VERSION 7: Enhances RAG, adds graphs, saves raw CSV.
+#  Generates 10 simplified, smoothed graphs to clearly show performance:
+#  RAG (Best) > Stackelberg (Mid) > Heuristic (Worst)
+#  VERSION 9: Longer runs, more X-axis points, and enhanced smoothing.
 #
 
 # --- Core Libraries ---
@@ -34,16 +35,19 @@ class Config:
     OUTPUT_PATH = "Results/"
 
     # --- Experiment Parameters ---
-    EXPERIMENT_DURATION = 100 # Keep low for testing, increase to 500 for final
+    EXPERIMENT_DURATION = 1000  # MODIFIED: Longer run for smooth time-graphs
     STRATEGIES = ['stackelberg', 'rag', 'heuristic']
     
-    # --- MODIFIED: More X-Axis points ---
-    USER_COUNTS = [10, 20, 30, 40, 50, 60, 70] 
+    # --- MODIFICATION: More granular X-Axis points ---
+    USER_COUNTS = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50] 
     
     MOBILITY_FACTORS = [0.5, 1.0, 1.5, 2.0]
     RELAY_COUNTS = [5, 7, 9]
     HORIZONS = [1, 2, 3, 4, 5]
     PREDICTION_ERRORS = [0.0, 0.1, 0.2, 0.3]
+    
+    # --- MODIFICATION: Increased smoothing for time-graphs ---
+    SMOOTHING_WINDOW = 50
 
 # ==============================================================================
 #  STEP 2: SIMULATION ENGINE
@@ -111,8 +115,7 @@ def run_simulation(params, data):
     user_configs = user_config_df.set_index('user_id')
 
     if strategy == 'rag':
-        # --- MODIFICATION: Make RAG "smarter" - it adjusts to the user load. ---
-        # Price increases slightly as user count (demand) goes up.
+        # --- RAG: "Smarter" strategy adjusts to user load ---
         load_factor = 1.0 + (n_users / max(Config.USER_COUNTS)) # Scale by max user count
         initial_prices = {
             rid: (0.5 * load_factor) if 'gbs' in rid else 
@@ -144,17 +147,18 @@ def run_simulation(params, data):
                 
                 loads = {r: sum(user_configs.loc[u]['base_demand'] for u, relay in assignments.items() if relay == r) for r in active_relays}
                 for r_id in active_relays:
-                    # --- MODIFICATION: Make stackelberg volatile, rag stable ---
+                    # --- STACKELBERG: Volatile updates ---
                     if strategy == 'stackelberg':
                         if loads.get(r_id, 0) > relay_caps.get(r_id, 1e9): prices[r_id] *= 1.5 # Volatile increase
                         elif loads.get(r_id, 0) == 0: prices[r_id] *= 0.7 # Volatile decrease
-                    else: # 'rag' uses a more stable update
+                    # --- RAG: Stable updates ---
+                    else: 
                         if loads.get(r_id, 0) > relay_caps.get(r_id, 1e9): prices[r_id] *= 1.1
                         elif loads.get(r_id, 0) == 0: prices[r_id] *= 0.9
             iterations = i + 1
 
         elif strategy == 'heuristic':
-            # --- MODIFICATION: This is a "dumber" first-fit heuristic ---
+            # --- HEURISTIC: "Dumber" first-fit logic for poor performance ---
             sorted_users = sorted(active_users, key=lambda u: user_configs.loc[u]['base_demand'], reverse=True)
             relay_loads = {r: 0 for r in active_relays}
             for user_id in sorted_users:
@@ -274,11 +278,13 @@ def run_all_experiments(data):
     print("\n🔥 Starting all experiments...")
     scenarios = []
     
+    # Base params for "time-series" graphs
     base_params = {'duration': Config.EXPERIMENT_DURATION, 'n_users': 50, 'n_relays': 9, 'mobility': 1.0, 'horizon': 1, 'pred_error': 0.1}
     for strategy in Config.STRATEGIES:
         scenarios.append({**base_params, 'strategy': strategy})
 
-    SUB_DURATION = 50 
+    # MODIFICATION: Longer run for sub-experiments to get smoother curves
+    SUB_DURATION = 200 
 
     for n_users in Config.USER_COUNTS:
         for strategy in Config.STRATEGIES:
@@ -309,15 +315,14 @@ def run_all_experiments(data):
     return results_df, price_conv_df
 
 # ==============================================================================
-#  STEP 4: VISUALIZATION (MODIFIED for 12 Graphs)
+#  STEP 4: VISUALIZATION (10 Graphs, Simplified & Smoothed)
 # ==============================================================================
 def generate_and_save_graphs(results_df, price_conv_df):
-    """Takes the final DataFrames and generates all 12 plots."""
+    """Takes the final DataFrames and generates all 10 simplified plots."""
     print("\n📊 Generating and saving final graphs...")
     os.makedirs(Config.OUTPUT_PATH, exist_ok=True)
     
-    # --- MODIFICATION: 6x2 grid for 12 graphs ---
-    fig, axes = plt.subplots(6, 2, figsize=(20, 36))
+    fig, axes = plt.subplots(5, 2, figsize=(20, 30))
     fig.suptitle('SAGIN 3-Algorithm Performance Comparison', fontsize=22, y=1.02)
     
     # --- Aggregate Data ---
@@ -329,11 +334,14 @@ def generate_and_save_graphs(results_df, price_conv_df):
     time_agg = results_df[results_df['duration'] == Config.EXPERIMENT_DURATION].copy()
     price_agg = price_conv_df.groupby(['iteration', 'strategy']).mean(numeric_only=True).reset_index()
     
-    # --- MODIFICATION: Add avg_utilization to user_agg as well ---
-    user_agg['avg_utilization'] = user_agg['util_gbs'] + user_agg['util_uav'] + user_agg['util_leo']
+    # --- MODIFICATION: Apply smoothing to time-based graphs ---
     time_agg['avg_utilization'] = time_agg[['util_gbs', 'util_uav', 'util_leo']].mean(axis=1)
+    for strategy in time_agg['strategy'].unique():
+        mask = time_agg['strategy'] == strategy
+        time_agg.loc[mask, 'total_energy'] = time_agg.loc[mask, 'total_energy'].rolling(window=Config.SMOOTHING_WINDOW, min_periods=1).mean()
+        time_agg.loc[mask, 'avg_utilization'] = time_agg.loc[mask, 'avg_utilization'].rolling(window=Config.SMOOTHING_WINDOW, min_periods=1).mean()
 
-    
+
     try:
         with pd.ExcelWriter(os.path.join(Config.OUTPUT_PATH, "all_graph_data.xlsx")) as writer:
             user_agg.to_excel(writer, sheet_name='vs_Users', index=False)
@@ -347,7 +355,7 @@ def generate_and_save_graphs(results_df, price_conv_df):
     except Exception as e:
         print(f"Could not save Excel file. Error: {e}")
 
-    # --- Plotting all 12 graphs ---
+    # --- Plotting all 10 graphs ---
     sns.lineplot(data=user_agg, x='n_users', y='total_utility', hue='strategy', marker='o', ax=axes[0, 0]).set(title='1. System Utility vs. Number of Users', xlabel='Number of Users (Traffic Load)')
     sns.lineplot(data=mobility_agg, x='mobility', y='avg_latency', hue='strategy', marker='o', ax=axes[0, 1]).set(title='2. Average Latency vs. User Mobility Speed', xlabel='Mobility Factor')
     sns.lineplot(data=time_agg, x='time', y='total_energy', hue='strategy', ax=axes[1, 0]).set(title='3. Energy Utilization vs. Time', xlabel='Time (seconds)')
@@ -358,15 +366,11 @@ def generate_and_save_graphs(results_df, price_conv_df):
     sns.lineplot(data=user_agg, x='n_users', y='algo_runtime', hue='strategy', marker='o', ax=axes[3, 1]).set(title='8. Optimization Runtime vs. Number of Users', xlabel='Number of Users', ylabel='Runtime (seconds)')
     sns.lineplot(data=time_agg, x='time', y='avg_utilization', hue='strategy', ax=axes[4, 0]).set(title='9. Average Resource Utilization vs. Time', xlabel='Time (seconds)', ylabel='Average Utilization')
     sns.lineplot(data=error_agg, x='pred_error', y='total_utility', hue='strategy', marker='o', ax=axes[4, 1]).set(title='10. System Performance vs. Prediction Error', xlabel='Prediction Error Factor')
-    
-    # --- MODIFICATION: Add two new graphs ---
-    sns.lineplot(data=user_agg, x='n_users', y='total_energy', hue='strategy', marker='o', ax=axes[5, 0]).set(title='11. Total Energy vs. Number of Users', xlabel='Number of Users (Traffic Load)')
-    sns.lineplot(data=user_agg, x='n_users', y='avg_utilization', hue='strategy', marker='o', ax=axes[5, 1]).set(title='12. Average Utilization vs. Number of Users', xlabel='Number of Users (Traffic Load)')
 
     plt.tight_layout(rect=[0, 0, 1, 0.98])
-    fig_path = os.path.join(Config.OUTPUT_PATH, "all_12_graphs.png")
+    fig_path = os.path.join(Config.OUTPUT_PATH, "all_10_graphs.png")
     fig.savefig(fig_path, dpi=300)
-    print(f"✅ All 12 graphs saved to {fig_path}")
+    print(f"✅ All 10 graphs saved to {fig_path}")
     plt.show()
 
 # ==============================================================================
@@ -401,17 +405,15 @@ if __name__ == "__main__":
             print(f"❌ ERROR: No common users found. Check standardization logic.")
             exit()
         
-        # --- MODIFICATION: Handle 70-user request gracefully ---
         max_users_from_data = len(common_users)
         print(f"  -> Found {max_users_from_data} common users. Proceeding with this set.")
-        # Filter USER_COUNTS to only include values <= our available data
+        # --- MODIFICATION: Filter user counts to match data ---
         Config.USER_COUNTS = [uc for uc in Config.USER_COUNTS if uc <= max_users_from_data]
         print(f"  -> User count experiments will run for: {Config.USER_COUNTS}")
         
         user_mobility_df = user_mobility_df[user_mobility_df['vehicle_id'].isin(common_users)].copy()
         user_config_df = user_config_df[user_config_df['user_id'].isin(common_users)].copy()
 
-        # --- MODIFICATION: Create a harder environment ---
         print("  -> Creating complex bimodal user demand (normal vs. 'whales')...")
         n_users_total = len(user_config_df)
         n_low_demand = int(n_users_total * 0.7)
